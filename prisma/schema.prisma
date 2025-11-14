@@ -1,0 +1,316 @@
+// FinModeler Prisma Schema
+// This schema defines all domain entities for the financial modeling SaaS
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// AUTH & USER MANAGEMENT
+// ============================================================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  role          UserRole  @default(MEMBER)
+
+  accounts      Account[]
+  sessions      Session[]
+  workspaces    WorkspaceMember[]
+  auditLogs     AuditLog[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+enum UserRole {
+  OWNER
+  MEMBER
+}
+
+// ============================================================================
+// WORKSPACE & MULTI-TENANCY
+// ============================================================================
+
+model Workspace {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  defaultCurrency String   @default("USD")
+
+  members         WorkspaceMember[]
+  companies       CompanyProfile[]
+  auditLogs       AuditLog[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(VIEWER)
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+enum WorkspaceRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+// ============================================================================
+// COMPANY & FINANCIAL MODEL
+// ============================================================================
+
+model CompanyProfile {
+  id              String        @id @default(cuid())
+  workspaceId     String
+  name            String
+  stage           CompanyStage  @default(PRE_SEED)
+  sector          CompanySector @default(SAAS)
+  country         String        @default("US")
+  currency        String        @default("USD")
+  startingCash    Float         @default(0)
+  startingMRR     Float         @default(0)
+  currentHeadcount Int          @default(0)
+
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assumptionSets  AssumptionSet[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("company_profiles")
+}
+
+enum CompanyStage {
+  IDEA
+  PRE_SEED
+  SEED
+  SERIES_A
+  OTHER
+}
+
+enum CompanySector {
+  SAAS
+  MARKETPLACE
+  FINTECH
+  D2C
+  OTHER
+}
+
+// ============================================================================
+// ASSUMPTIONS & MODELING
+// ============================================================================
+
+model AssumptionSet {
+  id                           String        @id @default(cuid())
+  companyId                    String
+  name                         String
+  startMonth                   String        // YYYY-MM format
+  months                       Int           @default(24)
+
+  // Revenue Model
+  pricingModel                 PricingModel  @default(PER_SEAT)
+  arpu                         Float         @default(0)
+  expectedNewCustomersPerMonth Float         @default(0)
+  expansionRevenueRate         Float         @default(0)
+  churnRate                    Float         @default(0.05)
+
+  // Customer Acquisition
+  cac                          Float         @default(0)
+  paybackPeriodMonths          Int           @default(12)
+
+  // Costs
+  grossMarginPercent           Float         @default(80)
+  fixedCostsPerMonth           Float         @default(0)
+  variableCostPercentOfRevenue Float         @default(0)
+
+  company                      CompanyProfile @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  hiringPlan                   HiringPlanItem[]
+  scenarios                    Scenario[]
+
+  createdAt                    DateTime      @default(now())
+  updatedAt                    DateTime      @updatedAt
+
+  @@map("assumption_sets")
+}
+
+enum PricingModel {
+  PER_USER
+  PER_SEAT
+  PER_TRANSACTION
+  FLAT_SUBSCRIPTION
+}
+
+model HiringPlanItem {
+  id                  String         @id @default(cuid())
+  assumptionSetId     String
+  monthOffset         Int
+  roleName            String
+  count               Int
+  monthlySalaryPerHead Float
+  department          Department     @default(OTHER)
+
+  assumptionSet       AssumptionSet  @relation(fields: [assumptionSetId], references: [id], onDelete: Cascade)
+
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  @@map("hiring_plan_items")
+}
+
+enum Department {
+  ENGINEERING
+  PRODUCT
+  SALES
+  MARKETING
+  OPS
+  OTHER
+}
+
+// ============================================================================
+// SCENARIOS & PROJECTIONS
+// ============================================================================
+
+model Scenario {
+  id              String        @id @default(cuid())
+  assumptionSetId String
+  name            ScenarioType  @default(BASE)
+  description     String?
+  overrides       Json?         // Stores scenario-specific overrides
+  isDefault       Boolean       @default(false)
+
+  assumptionSet   AssumptionSet @relation(fields: [assumptionSetId], references: [id], onDelete: Cascade)
+  projections     Projection[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("scenarios")
+}
+
+enum ScenarioType {
+  BASE
+  OPTIMISTIC
+  PESSIMISTIC
+  CUSTOM
+}
+
+model Projection {
+  id              String   @id @default(cuid())
+  scenarioId      String
+  monthIndex      Int
+  month           String   // YYYY-MM format
+
+  // Cash Flow
+  startingCash    Float
+  endingCash      Float
+  netBurn         Float
+  runwayMonths    Float?
+
+  // Customers & Revenue
+  newCustomers    Float
+  churnedCustomers Float
+  activeCustomers Float
+  mrr             Float
+  revenue         Float
+
+  // Costs
+  cogs            Float
+  grossProfit     Float
+  salaryCosts     Float
+  fixedCosts      Float
+  variableCosts   Float
+  totalOpex       Float
+
+  // Team
+  headcount       Int
+
+  scenario        Scenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+
+  @@unique([scenarioId, monthIndex])
+  @@map("projections")
+}
+
+// ============================================================================
+// AUDIT & ANALYTICS
+// ============================================================================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String?
+  action      String
+  metadata    Json?
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+}
